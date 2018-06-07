@@ -1,0 +1,1 @@
+java -jar Tester.jar -exec ".\x64\Release\CrystalLighting.exe" -seed 1
