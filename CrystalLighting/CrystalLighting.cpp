@@ -16,6 +16,8 @@
 
 using namespace std;
 
+vector< int > move_row { 1, -1, 0, 0 };
+vector< int > move_col { 0, 0, 1, -1 };
 
 class Crystal
 {
@@ -51,15 +53,47 @@ public:
 class CrystalLighting
 {
 public:
+    bool isInside( int r, int c ) 
+    {
+        return ( r >= 0 && r < H && c >= 0 && c < W );
+    }
+
+    bool isEmptyCell( int r, int c )
+    {
+        if ( isInside( r, c ) && board[ r ][ c ] == '.' )
+            return true;
+
+        return false;
+    }
+
+    void addCells( int r, int c )
+    {
+        for ( int dir = 0; dir < 4; ++dir )
+        {
+            int cell_r = r + move_row[ dir ];
+            int cell_c = c + move_col[ dir ];
+            while ( isEmptyCell( cell_r, cell_c ) )
+            {
+                int key = cell_r * W + cell_c;
+                if ( emptyCells.count( key ) == 0 )
+                    emptyCells[ key ] = Cell( cell_r, cell_c );
+
+                emptyCells[ key ].crystals.push_back( r * W + c );
+                cell_r += move_row[ dir ];
+                cell_c += move_col[ dir ];
+            }
+        }
+    }
+
     void getCrystals()
     {
         for ( int r = 0; r < H; ++r )
             for ( int c = 0; c < W; ++c )
-                if ( board[ r ][ c ] == '.' )
-                    emptyCells[ r * W + c ] = Cell( r, c );
-                else if ( board[ r ][ c ] != 'X' )
+                if ( board[ r ][ c ] != '.' && board[ r ][ c ] != 'X' )
+                {
                     crystals[ r * W + c ] = Crystal( r, c, board[ r ][ c ] );
-
+                    addCells( r, c );
+                }
     }
 
     vector< string > placeItems( vector< string > targetBoard, int costLantern, int costMirror, int costObstacle, int maxMirrors, int maxObstacles )
