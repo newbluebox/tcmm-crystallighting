@@ -21,7 +21,9 @@ using namespace std;
 std::random_device rd;  //Will be used to obtain a seed for the random number engine
 std::mt19937 gen( 1 ); //Standard mersenne_twister_engine seeded with rd()
 
+const double REMOVE_PROB = 0.1;
 const double MOVE_PROB = 0.5;
+const double OFF_PROB = 0.5;
 const double CONFLICT_PENALTY = -10000;
 
 
@@ -32,6 +34,17 @@ double sigmoid( double x )
 {
     return 1 / ( 1 + exp( -x ) );
 }
+
+struct Zone
+{
+    Zone() {};
+
+    Zone( int R, int C, int H, int W ) : r { R }, c { C }, h { H }, w { W }
+    {};
+
+    int r, c;
+    int h, w;
+};
 
 struct RowCol
 {
@@ -63,7 +76,7 @@ public:
     {
         int sum = 0;
         for ( auto & l : lights )
-            if ( l.second )
+            if ( l.second.size() > 0 )
                 sum += l.first;
 
         if ( sum == color )
@@ -74,7 +87,7 @@ public:
             ( color == 3 && ( sum == 1 || sum == 2 ) ) ||
             ( color == 5 && ( sum == 2 || sum == 3 ) ) ||
             ( color == 6 && ( sum == 4 || sum == 2 ) ) )
-            return -5;
+            return -10;
         else
             return -10;
     }
@@ -82,7 +95,7 @@ public:
     void reset()
     {
         for ( auto & l : lights )
-            l.second = false;
+            l.second.clear();
     }
 
 public:
@@ -94,7 +107,7 @@ public:
 
     // this map should have 3 elements max each corresponding to one of three possible colors
     // indicating which lanterns shine on this crystal
-    map< int, bool > lights;
+    map< int, vector< int > > lights;
 };
 
 class Cell
@@ -107,14 +120,6 @@ public:
         rc { RC }, potential { 0 }
     {}
 
-    //bool isLit()
-    //{
-    //    if ( lanterns.size() == 0 )
-    //        return false;
-
-    //    return true;
-    //}
-
 public:
     // location of the cell
     RowCol rc;
@@ -124,9 +129,6 @@ public:
 
     // list of all empty cells that are lightable from this cell
     vector< int > litableCells;
-
-    // list of lanterns that light this cell
-    //list < int > lanterns;
 
     int potential;
 };
@@ -138,13 +140,14 @@ public:
     {}
 
     Lantern( RowCol RC, int Color ) :
-        rc { RC }, color { Color }, score { 0 }
+        rc { RC }, color { Color }, score { 0 }//, on { true }
     {}
 
 public:
     RowCol rc;
     int color;
     double score;
+    //bool on;
 };
 
 class CrystalLighting
@@ -182,14 +185,36 @@ public:
         return ret;
     }
 
+    int accessWays( int r, int c )
+    {
+        int x = 0;
+
+        if ( isEmptyCell( r - 1, c ) ) x++;
+        if ( isEmptyCell( r, c - 1 ) ) x++;
+        if ( isEmptyCell( r + 1, c ) ) x++;
+        if ( isEmptyCell( r, c + 1 ) ) x++;
+
+        return x;
+    }
+
     // find all crystals and create a list of all empty cells from which these crystals can be lit
     void getCrystals()
     {
         for ( int r = 0; r < m_H; ++r )
             for ( int c = 0; c < m_W; ++c )
-                if ( m_board[ r ][ c ] != '.' && m_board[ r ][ c ] != 'X' )
+                if ( m_board[ r ][ c ] != '.' && m_board[ r ][ c ] != 'X' ) // Lantern
                 {
-                    m_crystals[ r * m_W + c ] = Crystal( RowCol( r, c ), m_board[ r ][ c ] );
+                    int crystal_key = r * m_W + c;
+                    m_crystals[ crystal_key ] = Crystal( RowCol( r, c ), m_board[ r ][ c ] );
+
+                    int accs = accessWays( r, c );
+
+                    if ( ( m_crystals[ crystal_key ].color == 1 || m_crystals[ crystal_key ].color == 2
+                        || m_crystals[ crystal_key ].color == 4 ) && accs > 0 )
+                        m_maxLanterns++;
+                    else if ( accs > 1 )
+                        m_maxLanterns += 2;
+
 
                     // find all cells that can lit this crystal
                     vector< RowCol > cells = findReachableCells( r, c );
@@ -210,6 +235,19 @@ public:
                         // record that a crystal at ( r, c ) is lightable from this cell
                         m_emptyCells[ key ].crystals.push_back( r * m_W + c );
                         m_emptyCells[ key ].potential += m_crystals[ r * m_W + c ].potentialScore();
+                    }
+                }
+                else if ( m_board[ r ][ c ] == '.' ) // From this empty cell you cannot light up any lanterns, might be good for blocks...
+                {
+                    int key = r * m_W + c;
+                    // if this empty cell has not been added to the emptyCells map
+                    // add the cell and record all cells that are lightable from this cell
+                    if ( m_emptyCells.count( key ) == 0 )
+                    {
+                        m_emptyCells[ key ] = Cell( RowCol( r, c ) );
+                        vector< RowCol > rcells = findReachableCells( r, c );
+                        for ( auto & x : rcells )
+                            m_emptyCells[ key ].litableCells.push_back( x.r * m_W + x.c );
                     }
                 }
     }
@@ -248,91 +286,90 @@ public:
 
     // put a lanter into a random empty cell
     // this placement should not create conflicts
-    void placeRandomLantern()
+    void placeRandomLantern( list< Lantern > & lanterns, map< int, vector< int > > & litCells )
     {
         // get a list of all cells that are valid for lantern placement
         vector< int > unlitCells;
         for ( auto & cell : m_emptyCells )
-            if ( m_litCells.count( cell.second.rc.r * m_W + cell.second.rc.c ) == 0 )
+            if ( litCells.count( cell.second.rc.r * m_W + cell.second.rc.c ) == 0 && cell.second.potential > 0 )
                 unlitCells.push_back( cell.first );
 
-        // pick a cell on random
-        std::uniform_int_distribution<> dis_pos( 0, unlitCells.size() - 1 );
-        int cell_key = unlitCells[ dis_pos( gen ) ];
-        Cell x = m_emptyCells[ cell_key ];
-        
-        int clr = pickRandomColor( cell_key );
+        if ( unlitCells.size() > 0 )
+        {
+            // pick a cell on random
+            std::uniform_int_distribution<> dis_pos( 0, unlitCells.size() - 1 );
+            int cell_key = unlitCells[ dis_pos( gen ) ];
+            Cell x = m_emptyCells[ cell_key ];
 
-        // create a lantern
-        m_lanterns.push_back( Lantern( x.rc, clr ) );
+            int clr = pickRandomColor( cell_key );
 
-        // lite the crystals with a chosen color
-        for ( auto & key : x.crystals )
-            m_crystals[ key ].lights[ clr ] = true;
+            // create a lantern
+            lanterns.push_back( Lantern( x.rc, clr ) );
 
-        // lite the lightable cells so they become not valid for lantern placement on the next step
-        // including itself
-        m_litCells[ cell_key ].push_back( cell_key );
-        for ( auto & key : m_emptyCells[ cell_key ].litableCells )
-            m_litCells[ key ].push_back( cell_key );
+            // lite the lightable cells so they become not valid for lantern placement on the next step
+            // including itself
+            litCells[ cell_key ].push_back( cell_key );
+            for ( auto & key : m_emptyCells[ cell_key ].litableCells )
+                litCells[ key ].push_back( cell_key );
+        }
     }
 
     // calculate local lantern scores in a current solution
-    void calculateLanternScores()
+    void calculateLanternScores( list< Lantern > & lanterns )
     {
-        for ( auto & lantern : m_lanterns )
+        for ( auto & lantern : lanterns )
         {
             int key = lantern.rc.r * m_W + lantern.rc.c;
             double potential_score = m_emptyCells[ key ].potential;
             double actual_score = 0;
 
             for ( auto & i : m_emptyCells[ key ].crystals )
-                actual_score += m_crystals[ i ].actualScore();
+            {
+                // penilize for lighting the same crystal with the same color from more than one lantern
+                int s = m_crystals[ i ].lights[ lantern.color ].size();
+                if ( s > 0 )
+                    actual_score += m_crystals[ i ].actualScore() / s;
+            }
 
-            lantern.score = sigmoid( 2 * actual_score / potential_score );
+            lantern.score = sigmoid( 3 * actual_score / potential_score );
         }
     }
 
     // move and change color of lanterns in the current solution
-    list< Lantern > alterLanterns( map< int, vector< int > > & litCells )
+    list< Lantern > alterLanterns( const list< Lantern > & lanterns, map< int, vector< int > > & litCells )
     {
         //calculateLanternScores();
         list< Lantern > altered;
 
         std::uniform_real_distribution<> dis( 0, 1 );
-        for ( auto const & lantern : m_lanterns )
+        for ( auto const & lantern : lanterns )
         {
             RowCol rc = lantern.rc;
             int color = lantern.color;
+            bool remove = false;
             // coin toss whether to alter this lantern
             double u = dis( gen );
             if ( u < ( 1 - lantern.score ) )
             {
-                // coin toss whether to move this lantern 
+                // coin toss whether to delete this lantern
                 u = dis( gen );
-                if ( u < MOVE_PROB )
+                if ( u < REMOVE_PROB )
+                    remove = true;
+                else
                 {
-                    vector< RowCol > candidates;
-                    int key = lantern.rc.r * m_W + lantern.rc.c;
-                    // go over all cells reachable from this cells and save those that are not more than 4 cells away
-                    for ( auto & k : m_emptyCells[ key ].litableCells )
-                        if ( ( abs( m_emptyCells[ k ].rc.r - lantern.rc.r ) +
-                            abs( m_emptyCells[ k ].rc.c - lantern.rc.c ) ) <= 4 )
-                            candidates.push_back( m_emptyCells[ k ].rc );
-                    
-                    std::uniform_int_distribution<> dis_keys( 0, candidates.size() - 1 );
-                    rc = candidates[ dis_keys( gen ) ];
+                    color = pickRandomColor( rc.r * m_W + rc.c );
                 }
-
-                color = pickRandomColor( rc.r * m_W + rc.c );
             }
 
-            altered.push_back( Lantern( rc, color ) );
+            if ( !remove )
+            {
+                altered.push_back( Lantern( rc, color ) );
+                int lantern_key = rc.r * m_W + rc.c;
+                litCells[ lantern_key ].push_back( lantern_key );
 
-            int lantern_key = rc.r * m_W + rc.c;
-            litCells[ lantern_key ].push_back( lantern_key );
-            for ( auto & key : m_emptyCells[ lantern_key ].litableCells )
-                litCells[ key ].push_back( lantern_key );
+                for ( auto & key : m_emptyCells[ lantern_key ].litableCells )
+                    litCells[ key ].push_back( lantern_key );
+            }
         }
 
         return altered;
@@ -346,14 +383,17 @@ public:
 
         // light up crystals given lanterns
         int penalty = 0;
+        int totalLanternCost = 0;
         for ( auto & lantern : lanterns )
         {
             int key = lantern.rc.r * m_W + lantern.rc.c;
             for ( auto & k : m_emptyCells[ key ].crystals )
-                m_crystals[ k ].lights[ lantern.color ] = true;
+                m_crystals[ k ].lights[ lantern.color ].push_back( key );
 
             if ( litCells[ key ].size() > 1 )
                 penalty += CONFLICT_PENALTY;
+
+            totalLanternCost += m_costLantern;
         }
 
         int score = 0;
@@ -361,26 +401,41 @@ public:
             score += crystal.second.actualScore();
 
         score += penalty;
+        score -= totalLanternCost;
 
         return score;
     }
 
     void optimize()
     {
-        for ( int i = 0; i < 20; ++i )
+        int Tmax = 1000;
+        int N = ceil( m_maxLanterns * 0.1 );
+        std::uniform_real_distribution<> dis( 0, 1 );
+        for ( int i = 0; i < Tmax; ++i )
         {
             // this will light up the crystals with the current m_lanterns
-            int current_sol_score = calculateSolutionScore( m_lanterns, m_litCells );
+            double current_sol_score = calculateSolutionScore( m_lanterns, m_litCells );
 
             // calculate local lantern score for lantern alterations
-            calculateLanternScores();
+            calculateLanternScores( m_lanterns );
 
             map< int, vector< int > > alteredLitCells;
-            list< Lantern > alteredLanterns = alterLanterns( alteredLitCells );
+            list< Lantern > alteredLanterns = alterLanterns( m_lanterns, alteredLitCells );
 
-            int new_sol_score = calculateSolutionScore( alteredLanterns, alteredLitCells );
+            double v = exp( -(double) ( 4 * i ) / Tmax );
+            double u;
+            for ( int j = 0; j < N; ++j )
+            {
+                u = dis( gen );
+                if ( u < v )
+                    placeRandomLantern( alteredLanterns, alteredLitCells );
+            }
 
-            if ( new_sol_score > current_sol_score )
+            double new_sol_score = calculateSolutionScore( alteredLanterns, alteredLitCells );
+
+            double w = sigmoid( ( 50 * i ) * ( new_sol_score - current_sol_score ) / abs( current_sol_score ) / Tmax );
+            u = dis( gen );
+            if ( u < w )
             {
                 m_lanterns = alteredLanterns;
                 m_litCells = alteredLitCells;
@@ -393,11 +448,56 @@ public:
         m_board = targetBoard;
         m_H = targetBoard.size();
         m_W = targetBoard[ 0 ].size();
+        m_costLantern = costLantern;
+        m_costMirror = costMirror;
+        m_costObstacle = costObstacle;
+        m_maxLanterns = 0;
+
+        int zone_H, zone_W;
+
+        if ( m_H > 10 )
+            zone_H = 10;
+        else 
+            zone_H = m_H;
+
+        if ( m_W > 10 )
+            zone_W = 10;
+        else
+            zone_W = m_W;
+
+        int i = 0, j = 0;
+
+        while ( i < m_H )
+        {
+            int h = 0;
+            if ( i + zone_H < m_H )
+                h = zone_H;
+            else
+                h = m_H - i;
+            
+            j = 0;
+
+            while ( j < m_W )
+            {
+
+                int w = 0;
+                if ( j + zone_H < m_W )
+                    w = zone_W;
+                else
+                    w = m_W - j;
+
+                zones.push_back( Zone( i, j, h, w ) );
+                j += w;
+            }
+            i += h;
+        }
+
+
 
         getCrystals();
 
-        for ( int i = 0; i < 10; ++i )
-            placeRandomLantern();
+        for ( int i = 0; i < ( m_maxLanterns * 0.1 ) ; ++i )
+            placeRandomLantern( m_lanterns, m_litCells );
 
         optimize();
 
@@ -420,12 +520,18 @@ private:
     list< Lantern > m_lanterns;
     vector< string > m_board;
     int m_H, m_W;
+    int m_costLantern;
+    int m_costMirror;
+    int m_costObstacle;
+    int m_maxLanterns;
+    vector< Zone > zones;
+    vector< vector< int > > zone_keys;
 };
 // -------8<------- end of solution submitted to the website -------8<-------
 
 void readTestFromFile()
 {
-    ifstream infile( "../input.txt" );
+    ifstream infile( "../input1.txt" );
     int costLantern, costMirror, costObstacle, maxMirrors, maxObstacles;
     infile >> costLantern >> costMirror >> costObstacle >> maxMirrors >> maxObstacles;
     vector< string > board;
@@ -448,20 +554,20 @@ template<class T> void getVector( vector<T>& v ) {
 
 int main() {
 
-    //readTestFromFile();
+    readTestFromFile();
 
-    CrystalLighting cl;
-    int H;
-    cin >> H;
-    vector<string> targetBoard( H );
-    getVector( targetBoard );
-    int costLantern, costMirror, costObstacle, maxMirrors, maxObstacles;
-    cin >> costLantern >> costMirror >> costObstacle >> maxMirrors >> maxObstacles;
+    //CrystalLighting cl;
+    //int H;
+    //cin >> H;
+    //vector<string> targetBoard( H );
+    //getVector( targetBoard );
+    //int costLantern, costMirror, costObstacle, maxMirrors, maxObstacles;
+    //cin >> costLantern >> costMirror >> costObstacle >> maxMirrors >> maxObstacles;
 
-    vector<string> ret = cl.placeItems( targetBoard, costLantern, costMirror, costObstacle, maxMirrors, maxObstacles );
-    cout << ret.size() << endl;
-    for ( int i = 0; i < (int)ret.size(); ++i )
-        cout << ret[ i ] << endl;
-    cout.flush();
+    //vector<string> ret = cl.placeItems( targetBoard, costLantern, costMirror, costObstacle, maxMirrors, maxObstacles );
+    //cout << ret.size() << endl;
+    //for ( int i = 0; i < (int)ret.size(); ++i )
+    //    cout << ret[ i ] << endl;
+    //cout.flush();
 }
 
